@@ -16,8 +16,11 @@ import argparse
 import asyncio
 import datetime
 import logging
+import os
 import tempfile
 import sys
+
+os.environ.setdefault("FASTMCP_LOG_ENABLED", "false")
 
 from fastmcp import FastMCP
 from fastmcp.utilities import logging as fastmcp_logger
@@ -76,7 +79,7 @@ async def main_async():
             mcp.add_middleware(middleware)
 
     try:
-        await mcp.run_async()
+        await mcp.run_async(show_banner=False)
 
     finally:
         if args.enable_proxy:
