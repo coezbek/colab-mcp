@@ -15,6 +15,7 @@
 import asyncio
 from colab_mcp import session
 from fastmcp.server.middleware import MiddlewareContext
+from mcp.types import CallToolResult, TextContent
 import pytest
 from unittest.mock import patch, AsyncMock, Mock
 
@@ -174,6 +175,47 @@ class TestCheckSessionProxyToolFn:
         assert "mcpProxyPort=1234" in args[0]
 
 
+class TestBuildSessionProxyTools:
+    @pytest.mark.asyncio
+    async def test_includes_static_proxy_wrappers(self, mock_proxy_client):
+        tools = session.build_session_proxy_tools(mock_proxy_client)
+        tool_names = {tool.name for tool in tools}
+
+        assert session.INJECTED_TOOL_NAME in tool_names
+        assert set(session.SESSION_PROXY_TOOL_NAMES).issubset(tool_names)
+
+    @pytest.mark.asyncio
+    async def test_proxy_wrapper_forwards_arguments(self, mock_proxy_client):
+        proxy_client = Mock()
+        proxy_client.is_connected.return_value = True
+        proxy_client.proxy_mcp_client = Mock()
+        proxy_client.proxy_mcp_client.call_tool_mcp = AsyncMock(
+            return_value=CallToolResult(
+                content=[TextContent(type="text", text="ok")],
+                structuredContent={"status": "ok"},
+                isError=False,
+            )
+        )
+
+        tools = session.build_session_proxy_tools(proxy_client)
+        tool = next(tool for tool in tools if tool.name == "get_cells")
+        result = await tool.run(arguments={"arguments": {"cell_id": "abc"}})
+
+        proxy_client.proxy_mcp_client.call_tool_mcp.assert_called_once_with(
+            "get_cells",
+            {"cell_id": "abc"},
+        )
+        assert result.structured_content == {"status": "ok"}
+
+    @pytest.mark.asyncio
+    async def test_proxy_wrapper_requires_connection(self, mock_proxy_client):
+        tools = session.build_session_proxy_tools(mock_proxy_client)
+        tool = next(tool for tool in tools if tool.name == "get_cells")
+
+        with pytest.raises(RuntimeError, match="open_colab_browser_connection"):
+            await tool.run(arguments={})
+
+
 class TestColabProxyClient:
     def test_is_connected(self, mock_wss):
         client = session.ColabProxyClient(mock_wss)
@@ -257,6 +299,10 @@ class TestColabSessionProxy:
         assert proxy.proxy_server is not None
         mock_colab_proxy_middleware.assert_called_once()
         mock_tool_injection_middleware.assert_called_once()
+        injected_tools = mock_tool_injection_middleware.call_args.kwargs["tools"]
+        injected_tool_names = {tool.name for tool in injected_tools}
+        assert session.INJECTED_TOOL_NAME in injected_tool_names
+        assert set(session.SESSION_PROXY_TOOL_NAMES).issubset(injected_tool_names)
 
     @pytest.mark.asyncio
     async def test_cleanup(self):

@@ -16,6 +16,7 @@ import asyncio
 from collections.abc import AsyncIterator
 import contextlib
 from contextlib import AsyncExitStack
+from typing import Any
 from fastmcp import FastMCP, Client
 from fastmcp.client.transports import ClientTransport
 from fastmcp.dependencies import CurrentContext
@@ -36,6 +37,15 @@ FE_CONNECTED_KEY = "fe_connected"
 PROXY_TOKEN_KEY = "proxy_token"
 PROXY_PORT_KEY = "proxy_port"
 INJECTED_TOOL_NAME = "open_colab_browser_connection"
+SESSION_PROXY_TOOL_NAMES = (
+    "add_code_cell",
+    "add_text_cell",
+    "delete_cell",
+    "get_cells",
+    "move_cell",
+    "run_code_cell",
+    "update_cell",
+)
 
 
 class ColabTransport(ClientTransport):
@@ -178,6 +188,49 @@ check_session_proxy_tool = Tool.from_function(
 )
 
 
+def _extract_tool_error(result) -> str:
+    texts = [content.text for content in result.content if isinstance(content, TextContent)]
+    if texts:
+        return "\n".join(texts)
+    return "The Colab notebook tool call failed."
+
+
+def build_session_proxy_tools(proxy_client: ColabProxyClient) -> list[Tool]:
+    def make_proxy_tool(tool_name: str) -> Tool:
+        async def proxy_tool(arguments: dict[str, Any] | None = None) -> ToolResult:
+            if not proxy_client.is_connected() or proxy_client.proxy_mcp_client is None:
+                raise RuntimeError(
+                    "Google Colab is not connected. Call open_colab_browser_connection first."
+                )
+
+            result = await proxy_client.proxy_mcp_client.call_tool_mcp(
+                tool_name,
+                arguments or {},
+            )
+            if result.isError:
+                raise RuntimeError(f"{tool_name} failed: {_extract_tool_error(result)}")
+
+            return ToolResult(
+                content=result.content,
+                structured_content=result.structuredContent,
+            )
+
+        return Tool.from_function(
+            fn=proxy_tool,
+            name=tool_name,
+            description=(
+                f"Forwards to the connected Colab notebook tool `{tool_name}`. "
+                "Pass the underlying Colab tool arguments in the `arguments` object."
+            ),
+            output_schema=None,
+        )
+
+    return [
+        check_session_proxy_tool,
+        *(make_proxy_tool(tool_name) for tool_name in SESSION_PROXY_TOOL_NAMES),
+    ]
+
+
 class ColabSessionProxy:
     def __init__(self):
         self._exit_stack = AsyncExitStack()
@@ -198,7 +251,7 @@ class ColabSessionProxy:
         # ColabProxyMiddleware must be first because it sets the fe_connected state
         self.middleware.append(ColabProxyMiddleware(proxy_client))
         self.middleware.append(
-            ToolInjectionMiddleware(tools=[check_session_proxy_tool])
+            ToolInjectionMiddleware(tools=build_session_proxy_tools(proxy_client))
         )
 
     async def cleanup(self):
